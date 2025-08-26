@@ -1,4 +1,3 @@
-bash
 FROM debian:stable
 RUN apt update && apt install -y curl gnupg dbus dbus-user-session sudo
 RUN curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg

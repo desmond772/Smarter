@@ -1,157 +1,94 @@
-"""
-Test script to verify the fixed connection issue in the new async API
-"""
-
+import os
 import asyncio
-import sys
-from loguru import logger
-from pocketoptionapi_async import AsyncPocketOptionClient
+import json
+import websockets
+from dotenv import load_dotenv
 
-# Configure logging
-logger.remove()
-logger.add(
-    sys.stdout,
-    format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
-)
+# Load environment variables
+load_dotenv()
 
+# Get environment variables
+POCKET_OPTION_SSID = os.getenv("POCKET_OPTION_SSID")
+WEBSOCKET_URL = os.getenv("WEBSOCKET_URL")
+ORIGIN = os.getenv("ORIGIN")
 
-async def test_connection_fix():
-    """Test the fixed connection with proper handshake sequence"""
+# Define functions for handling messages and authentication
+async def receive_messages(websocket):
+    try:
+        async for message in websocket:
+            if message == "2":
+                print("Received ping, sending pong")
+                await websocket.send("3")  # Send pong response
+            elif message.startswith('42["profile",'):
+                profile_info = json.loads(message[3:])[1]
+                balance = profile_info.get("balance")
+                demo_balance = profile_info.get("demoBalance")
+                currency = profile_info.get("currency")
+                print(f"Balance: {balance}")
+                print(f"Demo Balance: {demo_balance}")
+                print(f"Currency: {currency}")
+            else:
+                print(f"Received message: {message}")
+    except websockets.exceptions.ConnectionClosed as e:
+        print(f"Connection closed: {e.code} {e.reason}")
+        await reconnect(websocket)
+    except Exception as e:
+        print(f"Error receiving messages: {e}")
 
-    print("Testing Fixed Connection Issue")
-    print("=" * 60)
+async def send_authentication(websocket):
+    try:
+        auth_payload = f'42["auth",{{"session":"{POCKET_OPTION_SSID}","isDemo":0}}]'
+        await websocket.send(auth_payload)
+        print("Authentication message sent.")
+    except Exception as e:
+        print(f"Error sending authentication: {e}")
 
-    # Test with complete SSID format (like from browser)
-    complete_ssid = r'42["auth",{"session":"test_session_12345","isDemo":1,"uid":12345,"platform":1,"isFastHistory":true}]'
+async def get_balance(websocket):
+    try:
+        balance_payload = '42["profile"]'
+        await websocket.send(balance_payload)
+        print("Balance request sent.")
+    except Exception as e:
+        print(f"Error sending balance request: {e}")
 
-    print("📝 Using complete SSID format:")
-    print(f"   {complete_ssid[:50]}...")
-    print()
+async def reconnect(websocket):
+    try:
+        await websocket.close()
+        await asyncio.sleep(5)
+        async with websockets.connect(
+            WEBSOCKET_URL,
+            additional_headers={"Origin": ORIGIN},
+            open_timeout=10,
+        ) as new_websocket:
+            print("Reconnected to WebSocket")
+            await send_authentication(new_websocket)
+            await get_balance(new_websocket)
+            await receive_messages(new_websocket)
+    except Exception as e:
+        print(f"Error reconnecting: {e}")
+
+# Main function
+async def main():
+    if not WEBSOCKET_URL or not POCKET_OPTION_SSID:
+        print("Error: Missing environment variables. Check your .env file.")
+        return
+
+    headers = {
+        "Origin": ORIGIN,
+    }
 
     try:
-        # Create client
-        client = AsyncPocketOptionClient(
-            ssid=complete_ssid,
-            is_demo=True,
-            persistent_connection=False,  # Use regular connection for testing
-            auto_reconnect=True,
-        )
-
-        print(" Client created successfully")
-        print(f"🔍 Session ID: {client.session_id}")
-        print(f"👤 UID: {client.uid}")
-        print(f"Demo mode: {client.is_demo}")
-        print(f"🏷️  Platform: {client.platform}")
-        print()
-
-        # Test connection
-        print("Testing connection with improved handshake...")
-        try:
-            success = await client.connect()
-
-            if success:
-                print(" CONNECTION SUCCESSFUL!")
-                print(f"📊 Connection info: {client.connection_info}")
-                print(
-                    f"Connected to: {client.connection_info.region if client.connection_info else 'Unknown'}"
-                )
-
-                # Test basic functionality
-                print("\n📋 Testing basic functionality...")
-                try:
-                    balance = await client.get_balance()
-                    if balance:
-                        print(f"Balance: ${balance.balance}")
-                    else:
-                        print(" No balance data received (expected with test SSID)")
-                except Exception as e:
-                    print(f" Balance request failed (expected): {e}")
-
-                print("\n All connection tests passed!")
-
-            else:
-                print("Connection failed")
-
-        except Exception as e:
-            # This is expected with test SSID, but we should see proper handshake messages
-            print(f" Connection attempt result: {str(e)[:100]}...")
-            if "handshake" in str(e).lower() or "authentication" in str(e).lower():
-                print(
-                    " Handshake sequence is working (authentication failed as expected with test SSID)"
-                )
-            else:
-                print("Unexpected connection error")
-
-        finally:
-            await client.disconnect()
-            print("🛑 Disconnected")
-
+        async with websockets.connect(
+            WEBSOCKET_URL,
+            additional_headers=headers,
+            open_timeout=10,
+        ) as websocket:
+            print("WebSocket connection established.")
+            await send_authentication(websocket)
+            await get_balance(websocket)
+            await receive_messages(websocket)
     except Exception as e:
-        print(f"Test error: {e}")
-        return False
-
-    return True
-
-
-async def test_old_vs_new_comparison():
-    """Compare the handshake behavior with old API patterns"""
-
-    print("\n" + "=" * 60)
-    print("Connection Pattern Comparison")
-    print("=" * 60)
-
-    print("📋 OLD API Handshake Pattern:")
-    print('   1. Server sends: 0{"sid":"..."}')
-    print("   2. Client sends: 40")
-    print('   3. Server sends: 40{"sid":"..."}')
-    print("   4. Client sends: SSID message")
-    print('   5. Server sends: 451-["successauth",...]')
-    print()
-
-    print("📋 NEW API Handshake Pattern (FIXED):")
-    print("   1.  Wait for server message with '0' and 'sid'")
-    print("   2.  Send '40' response")
-    print("   3.  Wait for server message with '40' and 'sid'")
-    print("   4.  Send SSID authentication")
-    print("   5.  Wait for authentication response")
-    print()
-
-    print("Key Fixes Applied:")
-    print("    Proper message sequence waiting (like old API)")
-    print("    Handshake completion before background tasks")
-    print("    Authentication event handling")
-    print("    Timeout handling for server responses")
-    print()
-
-
-async def main():
-    """Main test function"""
-
-    print("Testing Fixed Async API Connection")
-    print("Goal: Verify connection works like old API")
-    print()
-
-    # Test the fixed connection
-    success = await test_connection_fix()
-
-    # Show comparison
-    await test_old_vs_new_comparison()
-
-    print("=" * 60)
-    if success:
-        print(" CONNECTION FIX VERIFICATION COMPLETE")
-        print(
-            "📝 The new async API now follows the same handshake pattern as the old API"
-        )
-        print("Key improvements:")
-        print("   • Proper server response waiting")
-        print("   • Sequential handshake messages")
-        print("   • Authentication event handling")
-        print("   • Error handling with timeouts")
-    else:
-        print("CONNECTION FIX NEEDS MORE WORK")
-    print("=" * 60)
-
+        print(f"An error occurred: {e}")
 
 if __name__ == "__main__":
     asyncio.run(main())
